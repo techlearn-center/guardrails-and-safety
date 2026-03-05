@@ -3,183 +3,350 @@
 | | |
 |---|---|
 | **Time** | 3-5 hours |
-| **Difficulty** | Beginner |
-| **Prerequisites** | Module 01 completed |
+| **Difficulty** | Beginner-Intermediate |
+| **Prerequisites** | Module 01, Python, JSON basics |
 
 ---
 
 ## Learning Objectives
 
-By the end of this module, you will be able to:
+By the end of this module you will be able to:
 
-- Understand the core concepts of Output Validation and Parsing
-- Set up and configure the required tools and environments
-- Complete hands-on exercises that demonstrate practical skills
-- Apply these skills in real-world scenarios
-- Pass the module validation to prove your understanding
-
----
-
-## Concepts
-
-### What is Output Validation and Parsing?
-
-Output Validation and Parsing is a fundamental component of AI Guardrails and Safety: Zero to Hero. In production environments, this skill is used daily by engineers to build, deploy, and maintain reliable systems.
-
-**Real-world analogy:** Think of Output Validation and Parsing like learning to read a map before navigating a city. Once you understand the fundamentals, you can find your way through any complex system.
-
-### Why Does This Matter?
-
-Companies like Google, Netflix, Amazon, and Meta rely on these practices to:
-- Deploy thousands of times per day
-- Maintain 99.99% uptime
-- Scale to millions of users
-- Recover from failures in minutes
-
-### Key Terminology
-
-| Term | Definition |
-|---|---|
-| **Core concept 1** | The foundational building block of this module |
-| **Core concept 2** | How components interact and communicate |
-| **Core concept 3** | The pattern used for reliability and scale |
-| **Best practice** | The industry-standard approach to implementation |
+1. Validate LLM outputs against JSON schemas using `jsonschema` and Pydantic.
+2. Enforce length constraints (character and token limits).
+3. Apply content-policy rules (blocked phrases, regex filters).
+4. Implement format enforcement (JSON, markdown, plain text).
+5. Build a reusable `OutputValidator` class that combines all checks.
 
 ---
 
-## Hands-On Lab
+## 1. Why Output Validation?
 
-### Prerequisites Check
+LLMs generate **unstructured text** by default. When your application expects
+structured data (JSON for an API, markdown for a CMS, a specific list format),
+the model may return:
 
-Before starting, verify your environment:
+- Malformed JSON with trailing commas or missing quotes
+- Outputs that exceed downstream token budgets
+- Responses containing forbidden phrases or unsafe content
+- Schema violations (missing required fields, wrong types)
 
-```bash
-# Check Docker is running
-docker --version
-docker compose version
+Output validation is the **last line of defense** before a response reaches the user.
 
-# Check you have the project cloned
-ls modules/02-output-validation/
+---
+
+## 2. JSON Schema Validation
+
+### Defining a Schema
+
+```python
+"""Validate LLM JSON output against a schema."""
+
+from jsonschema import validate, ValidationError
+
+# Define the expected output schema
+product_schema = {
+    "type": "object",
+    "properties": {
+        "name":        {"type": "string", "minLength": 1},
+        "price":       {"type": "number", "minimum": 0},
+        "currency":    {"type": "string", "enum": ["USD", "EUR", "GBP"]},
+        "in_stock":    {"type": "boolean"},
+        "tags":        {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["name", "price", "currency"],
+    "additionalProperties": False,
+}
+
+
+def validate_product_json(raw_output: str) -> dict:
+    """Parse and validate a product JSON string."""
+    import json
+
+    try:
+        data = json.loads(raw_output)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON: {e}")
+
+    try:
+        validate(instance=data, schema=product_schema)
+    except ValidationError as e:
+        raise ValueError(f"Schema violation: {e.message}")
+
+    return data
+
+
+# ----- Demo -----
+good = '{"name": "Widget", "price": 9.99, "currency": "USD", "in_stock": true}'
+bad  = '{"name": "", "price": -5, "currency": "YEN"}'
+
+print(validate_product_json(good))   # OK
+# validate_product_json(bad)         # raises ValueError
 ```
 
-### Exercise 1: Setup and Configuration
+### Using Pydantic for Typed Validation
 
-**Goal:** Get the foundation in place for this module.
+```python
+"""Pydantic model as an output schema."""
 
-**Step 1:** Review the starter files
-```bash
-ls modules/02-output-validation/lab/starter/
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional
+
+
+class ProductOutput(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    price: float = Field(..., ge=0)
+    currency: str = Field(..., pattern=r"^(USD|EUR|GBP)$")
+    in_stock: bool = True
+    tags: list[str] = Field(default_factory=list, max_length=10)
+    description: Optional[str] = Field(None, max_length=500)
+
+    @field_validator("tags")
+    @classmethod
+    def tags_must_be_lowercase(cls, v: list[str]) -> list[str]:
+        return [tag.lower().strip() for tag in v]
+
+
+# Parse LLM output directly into a typed model
+import json
+
+raw = '{"name": "Gadget", "price": 19.99, "currency": "EUR", "tags": ["NEW", "Sale"]}'
+product = ProductOutput.model_validate(json.loads(raw))
+print(product)
+# name='Gadget' price=19.99 currency='EUR' in_stock=True tags=['new', 'sale'] description=None
 ```
 
-**Step 2:** Set up the required environment
-```bash
-# Follow the specific setup for this module
-# Each command is explained below
-cd modules/02-output-validation/lab/starter/
+---
+
+## 3. Length Constraints
+
+```python
+"""Enforce character and token length limits."""
+
+
+def check_length(
+    text: str,
+    max_chars: int = 4096,
+    min_chars: int = 1,
+    max_tokens: int | None = None,
+) -> list[str]:
+    """Return a list of length-related errors (empty list = OK)."""
+    errors = []
+
+    if len(text) < min_chars:
+        errors.append(f"Too short: {len(text)} chars (min {min_chars})")
+
+    if len(text) > max_chars:
+        errors.append(f"Too long: {len(text)} chars (max {max_chars})")
+
+    if max_tokens is not None:
+        # Rough estimate: 1 token ~ 4 characters
+        est_tokens = len(text) // 4
+        if est_tokens > max_tokens:
+            errors.append(f"Estimated {est_tokens} tokens exceeds max {max_tokens}")
+
+    return errors
+
+
+# ----- Demo -----
+print(check_length("Hi", max_chars=100, min_chars=10))
+# ['Too short: 2 chars (min 10)']
+
+print(check_length("A" * 5000, max_chars=4096))
+# ['Too long: 5000 chars (max 4096)']
 ```
 
-**Step 3:** Verify the setup
+For accurate token counting, use `tiktoken`:
+
+```python
+import tiktoken
+
+def count_tokens(text: str, model: str = "gpt-4o") -> int:
+    """Count exact tokens for a given model."""
+    encoding = tiktoken.encoding_for_model(model)
+    return len(encoding.encode(text))
+```
+
+---
+
+## 4. Content Policy Enforcement
+
+```python
+"""Content policy checker with blocked phrases and regex filters."""
+
+import re
+
+
+class ContentPolicyChecker:
+    """Check LLM output against configurable content rules."""
+
+    def __init__(
+        self,
+        blocked_phrases: list[str] | None = None,
+        blocked_patterns: list[str] | None = None,
+    ):
+        self.blocked_phrases = blocked_phrases or [
+            "as an ai language model",
+            "i cannot provide",
+            "i'm sorry, but i",
+        ]
+        self.blocked_patterns = [
+            re.compile(p, re.IGNORECASE)
+            for p in (blocked_patterns or [
+                r"\b(kill|harm)\b.*\b(how|instructions)\b",
+                r"\b(hack|exploit)\b.*\b(system|password)\b",
+            ])
+        ]
+
+    def check(self, text: str) -> dict:
+        """Return {'passed': bool, 'violations': [...]}."""
+        violations = []
+
+        # Blocked phrases
+        lower = text.lower()
+        for phrase in self.blocked_phrases:
+            if phrase in lower:
+                violations.append(f"Blocked phrase: '{phrase}'")
+
+        # Blocked regex patterns
+        for pattern in self.blocked_patterns:
+            if pattern.search(text):
+                violations.append(f"Blocked pattern: {pattern.pattern}")
+
+        return {"passed": len(violations) == 0, "violations": violations}
+
+
+# ----- Demo -----
+checker = ContentPolicyChecker()
+print(checker.check("The weather in Paris is sunny."))
+# {'passed': True, 'violations': []}
+
+print(checker.check("As an AI language model, I cannot provide that."))
+# {'passed': False, 'violations': ["Blocked phrase: 'as an ai language model'", ...]}
+```
+
+---
+
+## 5. Format Enforcement
+
+```python
+"""Enforce that output is valid JSON, markdown, or plain text."""
+
+import json
+import re
+
+
+def enforce_format(text: str, expected: str) -> dict:
+    """
+    Validate that *text* matches the *expected* format.
+
+    Parameters
+    ----------
+    expected : str
+        One of "json", "markdown", "text".
+    """
+    errors = []
+
+    if expected == "json":
+        try:
+            json.loads(text)
+        except json.JSONDecodeError as e:
+            errors.append(f"Invalid JSON at position {e.pos}: {e.msg}")
+
+    elif expected == "markdown":
+        md_indicators = [
+            r"^#{1,6}\s",    # headings
+            r"\*\*.*\*\*",   # bold
+            r"\*.*\*",       # italic
+            r"```",          # code blocks
+            r"^\s*[-*]\s",   # unordered lists
+            r"^\s*\d+\.\s",  # ordered lists
+        ]
+        found = any(
+            re.search(pattern, text, re.MULTILINE)
+            for pattern in md_indicators
+        )
+        if not found:
+            errors.append("Output does not contain markdown formatting")
+
+    elif expected == "text":
+        # Plain text should not contain raw HTML or JSON
+        if text.strip().startswith("{") or text.strip().startswith("["):
+            errors.append("Plain text output appears to contain JSON")
+        if re.search(r"<[a-zA-Z][^>]*>", text):
+            errors.append("Plain text output appears to contain HTML")
+
+    return {"valid": len(errors) == 0, "errors": errors}
+```
+
+---
+
+## 6. Complete OutputValidator Class
+
+The `src/validators/output_validator.py` file in this repository combines all four
+techniques into a single reusable class:
+
+```python
+from src.validators import OutputValidator
+from src.validators.output_validator import ContentPolicy
+
+schema = {
+    "type": "object",
+    "properties": {
+        "answer": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    },
+    "required": ["answer", "confidence"],
+}
+
+validator = OutputValidator(
+    max_length=1000,
+    min_length=10,
+    json_schema=schema,
+    expected_format="json",
+    content_policy=ContentPolicy(blocked_phrases=["i cannot"]),
+)
+
+result = validator.validate('{"answer": "Paris", "confidence": 0.95}')
+print(f"Valid: {result.is_valid}")
+print(f"Errors: {result.errors}")
+print(f"Warnings: {result.warnings}")
+```
+
+---
+
+## 7. Hands-On Lab
+
+### Lab: Build a Multi-Format Output Validator
+
+**Objective:** Create a validator that can handle three output formats from an LLM API.
+
+1. Create `modules/02-output-validation/lab/starter/multi_validator.py`.
+2. Implement a `MultiFormatValidator` class that:
+   - Accepts an `expected_format` parameter (`"json"`, `"markdown"`, `"csv"`).
+   - For JSON: validates against a provided schema and checks required fields.
+   - For Markdown: ensures headings, lists, or code blocks are present.
+   - For CSV: validates column count consistency and header presence.
+3. Each validation returns `{"valid": bool, "errors": list, "sanitized": str}`.
+4. Write at least 5 test cases covering valid and invalid outputs per format.
+
+---
+
+## 8. Key Takeaways
+
+- Always validate LLM output **before** passing it downstream.
+- Use **JSON Schema** or **Pydantic** for structured outputs.
+- Combine length, format, and content-policy checks in a single validation pipeline.
+- Return detailed error messages so developers can debug model behavior.
+
+---
+
+## Validation
+
 ```bash
-# Run the validation to check your setup
 bash modules/02-output-validation/validation/validate.sh
 ```
 
-**What you should see:** The validation script will show PASS for setup-related checks.
-
-### Exercise 2: Core Implementation
-
-**Goal:** Implement the main concept of this module.
-
-Follow the detailed instructions in the starter directory. The solution directory contains the reference implementation if you get stuck.
-
-**Key points:**
-- Read each instruction carefully before executing
-- Understand WHY each step is needed, not just WHAT to do
-- If something fails, check the troubleshooting section below
-
-### Exercise 3: Integration and Testing
-
-**Goal:** Connect this module's work with the broader system.
-
-- Verify your implementation works with previous modules
-- Run all tests and validation scripts
-- Document what you learned
-
 ---
 
-## Starter Files
-
-Check `lab/starter/` for:
-- Configuration templates to fill in
-- Skeleton code to complete
-- Setup scripts to run
-
-## Solution Files
-
-If you get stuck, `lab/solution/` contains:
-- Complete working configuration
-- Fully implemented code
-- Expected output examples
-
-> **Important:** Try to complete the exercises yourself first! Looking at solutions too early reduces learning.
-
----
-
-## Common Mistakes
-
-| Mistake | Symptom | Fix |
-|---|---|---|
-| Skipping prerequisites | Module exercises fail | Complete previous modules first |
-| Copy-pasting without understanding | Cannot troubleshoot issues | Read explanations, not just commands |
-| Not checking validation | Think you are done but are not | Run validate.sh after each exercise |
-| Ignoring error messages | Problems compound | Read errors carefully, they tell you what is wrong |
-
----
-
-## Self-Check Questions
-
-Test your understanding before moving on:
-
-1. What is the main purpose of Output Validation and Parsing?
-2. How does this connect to the previous module?
-3. What would happen in production without this?
-4. Can you explain this concept to a non-technical person?
-5. What are three things that could go wrong, and how would you fix them?
-
----
-
-## You Know You Have Completed This Module When...
-
-- [ ] All exercises completed
-- [ ] Validation script passes: `bash modules/02-output-validation/validation/validate.sh`
-- [ ] You can explain the concepts without looking at notes
-- [ ] You understand how this applies to real-world scenarios
-- [ ] Self-check questions answered confidently
-
----
-
-## Troubleshooting
-
-### Common Issues
-
-**Issue: Validation script fails**
-- Re-read the exercise instructions
-- Check that Docker containers are running
-- Verify you are in the correct directory
-- Compare your work with the solution files
-
-**Issue: Docker container not starting**
-```bash
-docker compose logs <service-name>  # Check logs
-docker compose down && docker compose up -d  # Restart
-```
-
-**Issue: Permission denied**
-```bash
-chmod +x validation/validate.sh  # Make script executable
-sudo chown -R $USER .           # Fix ownership (Linux)
-```
-
----
-
-**Next: [Module 03 →](../03-content-filtering/)**
+**Next: [Module 03 -->](../03-content-filtering/)**

@@ -4,182 +4,239 @@
 |---|---|
 | **Time** | 3-5 hours |
 | **Difficulty** | Beginner |
-| **Prerequisites** | Docker installed, basic terminal knowledge |
+| **Prerequisites** | Basic Python, familiarity with LLMs |
 
 ---
 
 ## Learning Objectives
 
-By the end of this module, you will be able to:
+By the end of this module you will be able to:
 
-- Understand the core concepts of AI Safety Fundamentals
-- Set up and configure the required tools and environments
-- Complete hands-on exercises that demonstrate practical skills
-- Apply these skills in real-world scenarios
-- Pass the module validation to prove your understanding
-
----
-
-## Concepts
-
-### What is AI Safety Fundamentals?
-
-AI Safety Fundamentals is a fundamental component of AI Guardrails and Safety: Zero to Hero. In production environments, this skill is used daily by engineers to build, deploy, and maintain reliable systems.
-
-**Real-world analogy:** Think of AI Safety Fundamentals like learning to read a map before navigating a city. Once you understand the fundamentals, you can find your way through any complex system.
-
-### Why Does This Matter?
-
-Companies like Google, Netflix, Amazon, and Meta rely on these practices to:
-- Deploy thousands of times per day
-- Maintain 99.99% uptime
-- Scale to millions of users
-- Recover from failures in minutes
-
-### Key Terminology
-
-| Term | Definition |
-|---|---|
-| **Core concept 1** | The foundational building block of this module |
-| **Core concept 2** | How components interact and communicate |
-| **Core concept 3** | The pattern used for reliability and scale |
-| **Best practice** | The industry-standard approach to implementation |
+1. Explain the core categories of AI safety risks (hallucination, toxicity, data leakage, prompt injection, bias).
+2. Describe the defense-in-depth approach to LLM safety.
+3. Map each risk category to the guardrail technique that mitigates it.
+4. Identify real-world incidents where missing guardrails caused harm.
+5. Set up the project environment and run a baseline safety audit on an LLM response.
 
 ---
 
-## Hands-On Lab
+## 1. Why AI Safety Matters
 
-### Prerequisites Check
+Large Language Models are being deployed in customer-facing products at scale.
+Without guardrails, they can:
 
-Before starting, verify your environment:
+- **Hallucinate** -- invent facts, citations, or statistics that sound plausible but are wrong.
+- **Leak private data** -- regurgitate PII, API keys, or proprietary content from training data.
+- **Generate harmful content** -- produce toxic, biased, or dangerous outputs.
+- **Be manipulated** -- attackers craft inputs that override system instructions (prompt injection).
+- **Amplify bias** -- reflect and magnify societal biases present in training data.
 
-```bash
-# Check Docker is running
-docker --version
-docker compose version
+### Real-World Incidents
 
-# Check you have the project cloned
-ls modules/01-ai-safety-fundamentals/
+| Incident | Risk Category | Impact |
+|---|---|---|
+| Chatbot invents court cases | Hallucination | Lawyer sanctioned by court |
+| Customer-support bot leaks refund policies | Data leakage | Financial loss |
+| Image generator produces biased outputs | Bias | Brand damage |
+| Jailbroken chatbot gives dangerous advice | Prompt injection | Safety risk |
+
+---
+
+## 2. Taxonomy of AI Safety Risks
+
+```
+AI Safety Risks
+|-- Content Risks
+|   |-- Toxicity & hate speech
+|   |-- NSFW / sexually explicit content
+|   |-- Violence & self-harm
+|   +-- Misinformation
+|-- Security Risks
+|   |-- Prompt injection (direct & indirect)
+|   |-- Data exfiltration
+|   |-- Model theft / extraction
+|   +-- Adversarial inputs
+|-- Privacy Risks
+|   |-- PII leakage
+|   |-- Membership inference
+|   +-- Training data extraction
+|-- Reliability Risks
+|   |-- Hallucination
+|   |-- Inconsistency
+|   +-- Format / schema violations
++-- Fairness Risks
+    |-- Demographic bias
+    |-- Stereotyping
+    +-- Disparate performance
 ```
 
-### Exercise 1: Setup and Configuration
+---
 
-**Goal:** Get the foundation in place for this module.
+## 3. Defense-in-Depth Architecture
 
-**Step 1:** Review the starter files
-```bash
-ls modules/01-ai-safety-fundamentals/lab/starter/
+A production LLM system should apply guardrails at every layer:
+
+```
+User Input
+    |
+    v
++-------------------------+
+|  Input Guardrails        |  <-- Prompt injection detection, PII scanning, rate limiting
++-------------------------+
+    |
+    v
++-------------------------+
+|  LLM Processing          |  <-- System prompt hardening, context grounding
++-------------------------+
+    |
+    v
++-------------------------+
+|  Output Guardrails       |  <-- Content filtering, hallucination check, schema validation
++-------------------------+
+    |
+    v
+Safe Response to User
 ```
 
-**Step 2:** Set up the required environment
-```bash
-# Follow the specific setup for this module
-# Each command is explained below
-cd modules/01-ai-safety-fundamentals/lab/starter/
+### Python: Safety Audit Skeleton
+
+```python
+"""
+Baseline safety audit -- checks a single LLM response against
+a minimal set of safety rules.
+"""
+
+import re
+from dataclasses import dataclass, field
+
+
+@dataclass
+class AuditResult:
+    """Outcome of a safety audit."""
+    passed: bool = True
+    issues: list[str] = field(default_factory=list)
+
+
+def audit_response(response: str) -> AuditResult:
+    """Run a baseline safety audit on an LLM response."""
+    result = AuditResult()
+
+    # 1. Check for empty or whitespace-only output
+    if not response.strip():
+        result.passed = False
+        result.issues.append("Empty response")
+        return result
+
+    # 2. Check for excessive length (possible runaway generation)
+    if len(response) > 10_000:
+        result.issues.append(f"Response very long ({len(response)} chars)")
+
+    # 3. Check for PII patterns (quick regex)
+    ssn_pattern = r"\b\d{3}-\d{2}-\d{4}\b"
+    if re.search(ssn_pattern, response):
+        result.passed = False
+        result.issues.append("Possible SSN detected")
+
+    email_pattern = r"\b[\w.+-]+@[\w-]+\.[\w.]+\b"
+    if re.search(email_pattern, response):
+        result.issues.append("Email address detected")
+
+    # 4. Check for common refusal patterns (model may be over-refusing)
+    refusal_phrases = ["i cannot", "i'm unable", "as an ai"]
+    for phrase in refusal_phrases:
+        if phrase in response.lower():
+            result.issues.append(f"Refusal pattern detected: '{phrase}'")
+
+    return result
+
+
+# ----- Demo -----
+if __name__ == "__main__":
+    test_responses = [
+        "The capital of France is Paris.",
+        "Contact John at 123-45-6789 for details.",
+        "",
+        "As an AI, I cannot help with that request.",
+    ]
+
+    for resp in test_responses:
+        r = audit_response(resp)
+        status = "PASS" if r.passed else "FAIL"
+        print(f"[{status}] '{resp[:50]}...' Issues: {r.issues}")
 ```
 
-**Step 3:** Verify the setup
+---
+
+## 4. The Guardrail Toolkit at a Glance
+
+| Module | Technique | Mitigates |
+|---|---|---|
+| 02 | Output Validation | Schema violations, format errors |
+| 03 | Content Filtering | Toxicity, hate speech, NSFW |
+| 04 | PII Detection | Data leakage, privacy violations |
+| 05 | Hallucination Detection | Unfaithful outputs, made-up facts |
+| 06 | Prompt Injection Defense | Adversarial manipulation |
+| 07 | Guardrails Frameworks | All (integrated solution) |
+| 08 | Bias Detection | Fairness, stereotyping |
+| 09 | Compliance & Governance | Audit trails, accountability |
+| 10 | Production Pipeline | End-to-end safety monitoring |
+
+---
+
+## 5. Setting Up Your Environment
+
 ```bash
-# Run the validation to check your setup
+# Clone the repository
+git clone https://github.com/techlearn-center/guardrails-and-safety.git
+cd guardrails-and-safety
+
+# Create a virtual environment
+python -m venv .venv
+source .venv/bin/activate   # On Windows: .venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Copy environment config
+cp .env.example .env
+# Edit .env and add your OpenAI API key
+
+# Verify installation
+python -c "from src.validators import OutputValidator; print('Setup OK')"
+```
+
+---
+
+## 6. Hands-On Lab
+
+### Lab: Baseline Safety Audit
+
+**Objective:** Write a safety audit function that checks LLM responses for the five core risk categories.
+
+1. Create a file `modules/01-ai-safety-fundamentals/lab/starter/safety_audit.py`.
+2. Implement an `audit()` function that accepts a response string and returns a dict with:
+   - `is_safe: bool`
+   - `risks_found: list[str]`
+   - `risk_scores: dict[str, float]` -- one score per category (0.0 = safe, 1.0 = dangerous)
+3. Test against the sample responses provided in `test_responses.json`.
+4. Stretch goal: add a `suggest_guardrail()` function that recommends which module to study based on the detected risk.
+
+---
+
+## 7. Key Takeaways
+
+- AI safety is not a single check -- it requires **defense in depth**.
+- Every interaction with an LLM should pass through **input guards**, be processed with **grounded context**, and have its output **validated and filtered**.
+- The remaining nine modules each address one pillar of this safety architecture.
+
+---
+
+## Validation
+
+```bash
 bash modules/01-ai-safety-fundamentals/validation/validate.sh
 ```
 
-**What you should see:** The validation script will show PASS for setup-related checks.
-
-### Exercise 2: Core Implementation
-
-**Goal:** Implement the main concept of this module.
-
-Follow the detailed instructions in the starter directory. The solution directory contains the reference implementation if you get stuck.
-
-**Key points:**
-- Read each instruction carefully before executing
-- Understand WHY each step is needed, not just WHAT to do
-- If something fails, check the troubleshooting section below
-
-### Exercise 3: Integration and Testing
-
-**Goal:** Connect this module's work with the broader system.
-
-- Verify your implementation works with previous modules
-- Run all tests and validation scripts
-- Document what you learned
-
 ---
 
-## Starter Files
-
-Check `lab/starter/` for:
-- Configuration templates to fill in
-- Skeleton code to complete
-- Setup scripts to run
-
-## Solution Files
-
-If you get stuck, `lab/solution/` contains:
-- Complete working configuration
-- Fully implemented code
-- Expected output examples
-
-> **Important:** Try to complete the exercises yourself first! Looking at solutions too early reduces learning.
-
----
-
-## Common Mistakes
-
-| Mistake | Symptom | Fix |
-|---|---|---|
-| Skipping prerequisites | Module exercises fail | Complete previous modules first |
-| Copy-pasting without understanding | Cannot troubleshoot issues | Read explanations, not just commands |
-| Not checking validation | Think you are done but are not | Run validate.sh after each exercise |
-| Ignoring error messages | Problems compound | Read errors carefully, they tell you what is wrong |
-
----
-
-## Self-Check Questions
-
-Test your understanding before moving on:
-
-1. What is the main purpose of AI Safety Fundamentals?
-2. How does this connect to the previous module?
-3. What would happen in production without this?
-4. Can you explain this concept to a non-technical person?
-5. What are three things that could go wrong, and how would you fix them?
-
----
-
-## You Know You Have Completed This Module When...
-
-- [ ] All exercises completed
-- [ ] Validation script passes: `bash modules/01-ai-safety-fundamentals/validation/validate.sh`
-- [ ] You can explain the concepts without looking at notes
-- [ ] You understand how this applies to real-world scenarios
-- [ ] Self-check questions answered confidently
-
----
-
-## Troubleshooting
-
-### Common Issues
-
-**Issue: Validation script fails**
-- Re-read the exercise instructions
-- Check that Docker containers are running
-- Verify you are in the correct directory
-- Compare your work with the solution files
-
-**Issue: Docker container not starting**
-```bash
-docker compose logs <service-name>  # Check logs
-docker compose down && docker compose up -d  # Restart
-```
-
-**Issue: Permission denied**
-```bash
-chmod +x validation/validate.sh  # Make script executable
-sudo chown -R $USER .           # Fix ownership (Linux)
-```
-
----
-
-**Next: [Module 02 →](../02-output-validation/)**
+**Next: [Module 02 -->](../02-output-validation/)**

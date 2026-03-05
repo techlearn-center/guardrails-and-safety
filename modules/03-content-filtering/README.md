@@ -3,183 +3,385 @@
 | | |
 |---|---|
 | **Time** | 3-5 hours |
-| **Difficulty** | Beginner |
-| **Prerequisites** | Module 02 completed |
+| **Difficulty** | Intermediate |
+| **Prerequisites** | Module 01-02, OpenAI API key |
 
 ---
 
 ## Learning Objectives
 
-By the end of this module, you will be able to:
+By the end of this module you will be able to:
 
-- Understand the core concepts of Content Filtering and Moderation
-- Set up and configure the required tools and environments
-- Complete hands-on exercises that demonstrate practical skills
-- Apply these skills in real-world scenarios
-- Pass the module validation to prove your understanding
-
----
-
-## Concepts
-
-### What is Content Filtering and Moderation?
-
-Content Filtering and Moderation is a fundamental component of AI Guardrails and Safety: Zero to Hero. In production environments, this skill is used daily by engineers to build, deploy, and maintain reliable systems.
-
-**Real-world analogy:** Think of Content Filtering and Moderation like learning to read a map before navigating a city. Once you understand the fundamentals, you can find your way through any complex system.
-
-### Why Does This Matter?
-
-Companies like Google, Netflix, Amazon, and Meta rely on these practices to:
-- Deploy thousands of times per day
-- Maintain 99.99% uptime
-- Scale to millions of users
-- Recover from failures in minutes
-
-### Key Terminology
-
-| Term | Definition |
-|---|---|
-| **Core concept 1** | The foundational building block of this module |
-| **Core concept 2** | How components interact and communicate |
-| **Core concept 3** | The pattern used for reliability and scale |
-| **Best practice** | The industry-standard approach to implementation |
+1. Use the OpenAI Moderation API to classify text across safety categories.
+2. Build a custom toxicity scorer using keyword lists and weighted scoring.
+3. Implement hate speech detection with configurable thresholds.
+4. Filter NSFW content in both text and image description contexts.
+5. Chain multiple content filters into a single moderation pipeline.
 
 ---
 
-## Hands-On Lab
+## 1. The Content Safety Problem
 
-### Prerequisites Check
+LLMs can generate text across every category of harmful content:
 
-Before starting, verify your environment:
+| Category | Example | Risk |
+|---|---|---|
+| Toxicity | Insults, profanity, personal attacks | User harm, brand damage |
+| Hate speech | Slurs, discrimination, dehumanization | Legal liability, ethical violations |
+| NSFW | Sexually explicit or graphic content | Policy violations |
+| Violence | Glorification, instructions for harm | Physical safety |
+| Self-harm | Suicide, eating disorder promotion | User safety |
 
-```bash
-# Check Docker is running
-docker --version
-docker compose version
+Content filtering catches these outputs **after** the LLM generates them but
+**before** they reach the end user.
 
-# Check you have the project cloned
-ls modules/03-content-filtering/
+---
+
+## 2. OpenAI Moderation API
+
+The fastest way to add content filtering is the OpenAI Moderation endpoint,
+which is **free** for all API users.
+
+```python
+"""Content moderation using the OpenAI Moderation API."""
+
+from openai import OpenAI
+
+
+def moderate_text(text: str) -> dict:
+    """
+    Check text against OpenAI's moderation categories.
+
+    Returns
+    -------
+    dict with keys:
+        flagged : bool -- True if any category exceeds threshold
+        categories : dict -- category name -> bool
+        scores : dict -- category name -> float (0-1)
+    """
+    client = OpenAI()  # Uses OPENAI_API_KEY from env
+
+    response = client.moderations.create(
+        model="omni-moderation-latest",
+        input=text,
+    )
+
+    result = response.results[0]
+
+    return {
+        "flagged": result.flagged,
+        "categories": {k: v for k, v in result.categories.__dict__.items()},
+        "scores": {k: round(v, 4) for k, v in result.category_scores.__dict__.items()},
+    }
+
+
+# ----- Demo -----
+if __name__ == "__main__":
+    safe_text = "The weather in Paris is beautiful in spring."
+    print("Safe text:", moderate_text(safe_text))
+
+    borderline = "I'm so angry I could scream at the wall."
+    print("Borderline:", moderate_text(borderline))
 ```
 
-### Exercise 1: Setup and Configuration
+### Moderation Categories
 
-**Goal:** Get the foundation in place for this module.
+The API checks for these categories:
 
-**Step 1:** Review the starter files
-```bash
-ls modules/03-content-filtering/lab/starter/
+- `hate` -- Content expressing hatred toward a group
+- `hate/threatening` -- Hateful content with violence
+- `harassment` -- Targeting an individual
+- `harassment/threatening` -- Harassment with violence
+- `self-harm` -- Promoting or depicting self-harm
+- `self-harm/intent` -- Expressing intent to self-harm
+- `self-harm/instructions` -- Instructions for self-harm
+- `sexual` -- Sexually explicit content
+- `sexual/minors` -- Sexual content involving minors
+- `violence` -- Content depicting violence
+- `violence/graphic` -- Graphic violence
+
+---
+
+## 3. Custom Toxicity Scorer
+
+When you need more control (or want to avoid external API calls), build a
+local toxicity scorer:
+
+```python
+"""Custom toxicity scorer with keyword matching and scoring."""
+
+import re
+from dataclasses import dataclass
+
+
+@dataclass
+class ToxicityScore:
+    score: float          # 0.0 (safe) to 1.0 (toxic)
+    category: str         # most relevant category
+    flagged: bool         # True if score > threshold
+    matched_terms: list[str]
+
+
+# Weighted keyword lists (word -> weight)
+TOXICITY_KEYWORDS: dict[str, dict[str, float]] = {
+    "profanity": {
+        "damn": 0.3, "hell": 0.2, "crap": 0.2,
+        # In production, use a comprehensive list
+    },
+    "insults": {
+        "stupid": 0.4, "idiot": 0.5, "moron": 0.5,
+        "dumb": 0.3, "pathetic": 0.4,
+    },
+    "threats": {
+        "kill": 0.7, "destroy": 0.5, "hurt": 0.5,
+        "attack": 0.4, "punch": 0.5,
+    },
+}
+
+
+class ToxicityScorer:
+    """Score text toxicity using weighted keyword matching."""
+
+    def __init__(self, threshold: float = 0.5):
+        self.threshold = threshold
+
+    def score(self, text: str) -> ToxicityScore:
+        """Score the toxicity of *text*."""
+        lower = text.lower()
+        max_score = 0.0
+        max_category = "none"
+        all_matched: list[str] = []
+
+        for category, keywords in TOXICITY_KEYWORDS.items():
+            category_score = 0.0
+            matched: list[str] = []
+
+            for word, weight in keywords.items():
+                pattern = rf"\b{re.escape(word)}\b"
+                count = len(re.findall(pattern, lower))
+                if count > 0:
+                    category_score += weight * count
+                    matched.append(word)
+
+            if category_score > max_score:
+                max_score = category_score
+                max_category = category
+            all_matched.extend(matched)
+
+        # Normalize score to 0-1 range
+        normalized = min(max_score / 2.0, 1.0)
+
+        return ToxicityScore(
+            score=round(normalized, 3),
+            category=max_category,
+            flagged=normalized >= self.threshold,
+            matched_terms=all_matched,
+        )
+
+
+# ----- Demo -----
+if __name__ == "__main__":
+    scorer = ToxicityScorer(threshold=0.3)
+
+    texts = [
+        "Have a wonderful day!",
+        "That was a stupid decision, you idiot.",
+        "I want to destroy the competition in the market.",
+    ]
+
+    for t in texts:
+        result = scorer.score(t)
+        flag = "FLAGGED" if result.flagged else "OK"
+        print(f"[{flag}] score={result.score} cat={result.category} -- {t[:60]}")
 ```
 
-**Step 2:** Set up the required environment
-```bash
-# Follow the specific setup for this module
-# Each command is explained below
-cd modules/03-content-filtering/lab/starter/
+---
+
+## 4. Hate Speech Detection
+
+```python
+"""Hate speech detector using pattern matching and the OpenAI moderation API."""
+
+import re
+from typing import Optional
+
+
+class HateSpeechDetector:
+    """
+    Detect hate speech using layered approach:
+      1. Pattern matching against known targeting phrases
+      2. Contextual analysis (who is being targeted)
+      3. OpenAI Moderation API for nuanced cases
+    """
+
+    # Patterns that indicate targeting of protected groups
+    TARGETING_PATTERNS = [
+        r"(?i)\b(all|every|those)\s+\w+\s+(are|should|must|need to)\b",
+        r"(?i)\b(go back to|don't belong|inferior|subhuman)\b",
+        r"(?i)\b(exterminate|eradicate|purge)\b.*\b(people|group|race)\b",
+    ]
+
+    def __init__(self, threshold: float = 0.6):
+        self.threshold = threshold
+
+    def detect(self, text: str) -> dict:
+        """
+        Analyze text for hate speech.
+
+        Returns dict with is_hate_speech, confidence, and targeting_patterns.
+        """
+        matched_patterns = []
+
+        for pattern in self.TARGETING_PATTERNS:
+            matches = re.findall(pattern, text)
+            if matches:
+                matched_patterns.append(pattern)
+
+        confidence = min(len(matched_patterns) * 0.3, 1.0)
+
+        return {
+            "is_hate_speech": confidence >= self.threshold,
+            "confidence": round(confidence, 3),
+            "targeting_patterns": matched_patterns,
+        }
+
+    def detect_with_moderation(self, text: str) -> dict:
+        """Enhanced detection using OpenAI moderation API."""
+        from openai import OpenAI
+
+        client = OpenAI()
+        response = client.moderations.create(input=text)
+        result = response.results[0]
+
+        hate_score = result.category_scores.hate
+        harassment_score = result.category_scores.harassment
+
+        combined_score = max(hate_score, harassment_score)
+
+        return {
+            "is_hate_speech": combined_score >= self.threshold,
+            "confidence": round(combined_score, 4),
+            "hate_score": round(hate_score, 4),
+            "harassment_score": round(harassment_score, 4),
+        }
 ```
 
-**Step 3:** Verify the setup
+---
+
+## 5. Building a Moderation Pipeline
+
+Combine multiple filters into a single pipeline:
+
+```python
+"""Multi-stage content moderation pipeline."""
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Callable
+
+
+class Action(Enum):
+    ALLOW = "allow"
+    WARN = "warn"
+    BLOCK = "block"
+
+
+@dataclass
+class ModerationResult:
+    action: Action = Action.ALLOW
+    reasons: list[str] = field(default_factory=list)
+    scores: dict[str, float] = field(default_factory=dict)
+
+
+class ModerationPipeline:
+    """Chain multiple content filters together."""
+
+    def __init__(self):
+        self._filters: list[tuple[str, Callable, float]] = []
+
+    def add_filter(
+        self,
+        name: str,
+        filter_fn: Callable[[str], float],
+        threshold: float = 0.5,
+    ):
+        """Add a filter that returns a score (0-1)."""
+        self._filters.append((name, filter_fn, threshold))
+        return self  # for chaining
+
+    def moderate(self, text: str) -> ModerationResult:
+        """Run all filters and return aggregate result."""
+        result = ModerationResult()
+
+        for name, filter_fn, threshold in self._filters:
+            score = filter_fn(text)
+            result.scores[name] = round(score, 4)
+
+            if score >= threshold:
+                result.action = Action.BLOCK
+                result.reasons.append(f"{name} score {score:.3f} >= {threshold}")
+            elif score >= threshold * 0.7:
+                if result.action != Action.BLOCK:
+                    result.action = Action.WARN
+                result.reasons.append(
+                    f"{name} score {score:.3f} approaching threshold"
+                )
+
+        return result
+
+
+# ----- Usage -----
+def simple_toxicity(text: str) -> float:
+    bad_words = ["stupid", "idiot", "hate"]
+    count = sum(1 for w in bad_words if w in text.lower())
+    return min(count * 0.3, 1.0)
+
+def length_check(text: str) -> float:
+    return min(len(text) / 10000, 1.0)
+
+pipeline = ModerationPipeline()
+pipeline.add_filter("toxicity", simple_toxicity, threshold=0.5)
+pipeline.add_filter("length", length_check, threshold=0.8)
+
+result = pipeline.moderate("You are such an idiot, I hate this stupid thing!")
+print(f"Action: {result.action.value}")
+print(f"Reasons: {result.reasons}")
+print(f"Scores: {result.scores}")
+```
+
+---
+
+## 6. Hands-On Lab
+
+### Lab: Content Moderation Service
+
+**Objective:** Build a FastAPI service that filters LLM outputs before returning them.
+
+1. Create `modules/03-content-filtering/lab/starter/moderation_api.py`.
+2. Implement a `POST /moderate` endpoint that accepts `{"text": "...", "categories": [...]}`.
+3. Run the text through:
+   - Local toxicity scorer (keyword-based)
+   - OpenAI Moderation API (if API key available)
+4. Return `{"action": "allow|warn|block", "details": {...}}`.
+5. Add a `POST /filter` endpoint that returns sanitized text with toxic segments replaced by `[REDACTED]`.
+
+---
+
+## 7. Key Takeaways
+
+- The **OpenAI Moderation API** is free and covers common safety categories out of the box.
+- For **offline or custom** requirements, build keyword-based and ML-based scorers.
+- Always use a **pipeline** approach so you can add, remove, or tune individual filters independently.
+- Log moderation decisions for auditing and threshold tuning.
+
+---
+
+## Validation
+
 ```bash
-# Run the validation to check your setup
 bash modules/03-content-filtering/validation/validate.sh
 ```
 
-**What you should see:** The validation script will show PASS for setup-related checks.
-
-### Exercise 2: Core Implementation
-
-**Goal:** Implement the main concept of this module.
-
-Follow the detailed instructions in the starter directory. The solution directory contains the reference implementation if you get stuck.
-
-**Key points:**
-- Read each instruction carefully before executing
-- Understand WHY each step is needed, not just WHAT to do
-- If something fails, check the troubleshooting section below
-
-### Exercise 3: Integration and Testing
-
-**Goal:** Connect this module's work with the broader system.
-
-- Verify your implementation works with previous modules
-- Run all tests and validation scripts
-- Document what you learned
-
 ---
 
-## Starter Files
-
-Check `lab/starter/` for:
-- Configuration templates to fill in
-- Skeleton code to complete
-- Setup scripts to run
-
-## Solution Files
-
-If you get stuck, `lab/solution/` contains:
-- Complete working configuration
-- Fully implemented code
-- Expected output examples
-
-> **Important:** Try to complete the exercises yourself first! Looking at solutions too early reduces learning.
-
----
-
-## Common Mistakes
-
-| Mistake | Symptom | Fix |
-|---|---|---|
-| Skipping prerequisites | Module exercises fail | Complete previous modules first |
-| Copy-pasting without understanding | Cannot troubleshoot issues | Read explanations, not just commands |
-| Not checking validation | Think you are done but are not | Run validate.sh after each exercise |
-| Ignoring error messages | Problems compound | Read errors carefully, they tell you what is wrong |
-
----
-
-## Self-Check Questions
-
-Test your understanding before moving on:
-
-1. What is the main purpose of Content Filtering and Moderation?
-2. How does this connect to the previous module?
-3. What would happen in production without this?
-4. Can you explain this concept to a non-technical person?
-5. What are three things that could go wrong, and how would you fix them?
-
----
-
-## You Know You Have Completed This Module When...
-
-- [ ] All exercises completed
-- [ ] Validation script passes: `bash modules/03-content-filtering/validation/validate.sh`
-- [ ] You can explain the concepts without looking at notes
-- [ ] You understand how this applies to real-world scenarios
-- [ ] Self-check questions answered confidently
-
----
-
-## Troubleshooting
-
-### Common Issues
-
-**Issue: Validation script fails**
-- Re-read the exercise instructions
-- Check that Docker containers are running
-- Verify you are in the correct directory
-- Compare your work with the solution files
-
-**Issue: Docker container not starting**
-```bash
-docker compose logs <service-name>  # Check logs
-docker compose down && docker compose up -d  # Restart
-```
-
-**Issue: Permission denied**
-```bash
-chmod +x validation/validate.sh  # Make script executable
-sudo chown -R $USER .           # Fix ownership (Linux)
-```
-
----
-
-**Next: [Module 04 →](../04-pii-detection/)**
+**Next: [Module 04 -->](../04-pii-detection/)**
